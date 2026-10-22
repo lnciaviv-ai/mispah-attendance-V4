@@ -140,12 +140,80 @@ def init_db():
         notes TEXT,
         FOREIGN KEY (signed_by) REFERENCES users(id)
     );
+
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_user INTEGER NOT NULL,
+        to_user INTEGER,
+        subject TEXT,
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        read_at TEXT,
+        is_broadcast INTEGER DEFAULT 0,
+        FOREIGN KEY (from_user) REFERENCES users(id),
+        FOREIGN KEY (to_user) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS reminder_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        message TEXT,
+        channel TEXT,
+        created_at TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        action TEXT NOT NULL,
+        detail TEXT,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS announcements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        created_by INTEGER,
+        created_at TEXT NOT NULL,
+        active INTEGER DEFAULT 1
+    );
     """)
 
     try:
         cur.execute("ALTER TABLE classes ADD COLUMN theme TEXT DEFAULT 'ocean'")
     except sqlite3.OperationalError:
         pass
+
+
+    # Column migrations (safe if already exist)
+    for stmt in [
+        "ALTER TABLE classes ADD COLUMN theme TEXT DEFAULT 'ocean'",
+        "ALTER TABLE users ADD COLUMN phone TEXT",
+        "ALTER TABLE users ADD COLUMN active INTEGER DEFAULT 1",
+        "ALTER TABLE attendance ADD COLUMN reason TEXT",
+        "ALTER TABLE attendance ADD COLUMN status_detail TEXT",
+    ]:
+        try:
+            cur.execute(stmt)
+        except Exception:
+            pass
+
+    # Default settings
+    defaults = {
+        "school_name": "Mispah Skool vir LSEN",
+        "reminder_time": "07:30",
+        "reminder_message": "Goeie more! Moet asseblief vandag se bywoning merk. Dankie.",
+        "admin_display_name": "Administrator",
+    }
+    for k, v in defaults.items():
+        cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)", (k, v))
 
     classes = [
         (1, "Multi-Graad 3", "Mev. RM Maree", 1, "ocean"),
@@ -219,6 +287,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+    ensure_schema()
     print("Database initialised:", DB_PATH)
 
 def authenticate(username: str, password: str):
@@ -969,15 +1038,108 @@ def add_announcement(title, body, user_id):
     conn.close()
     return aid
 
-def get_active_announcements():
+
+def ensure_schema():
+    """Create any missing tables/columns. Safe to call repeatedly."""
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT a.*, u.full_name FROM announcements a
-        LEFT JOIN users u ON u.id = a.created_by
-        WHERE a.active=1 ORDER BY a.created_at DESC LIMIT 5
-    """)
-    rows = [dict(r) for r in cur.fetchall()]
+    tables = [
+        """CREATE TABLE IF NOT EXISTS announcements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_by INTEGER,
+            created_at TEXT NOT NULL,
+            active INTEGER DEFAULT 1
+        )""",
+        """CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            action TEXT NOT NULL,
+            detail TEXT,
+            created_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user INTEGER NOT NULL,
+            to_user INTEGER,
+            subject TEXT,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            read_at TEXT,
+            is_broadcast INTEGER DEFAULT 0
+        )""",
+        """CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS admin_signoff (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attendance_date TEXT NOT NULL UNIQUE,
+            signed_by INTEGER NOT NULL,
+            signed_at TEXT NOT NULL,
+            notes TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS reminder_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            message TEXT,
+            channel TEXT,
+            created_at TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS daily_signatures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attendance_date TEXT NOT NULL,
+            class_id INTEGER NOT NULL,
+            signed_by INTEGER,
+            signed_at TEXT,
+            UNIQUE(attendance_date, class_id)
+        )""",
+    ]
+    for t in tables:
+        try:
+            cur.execute(t)
+        except Exception:
+            pass
+    for stmt in [
+        "ALTER TABLE classes ADD COLUMN theme TEXT DEFAULT 'ocean'",
+        "ALTER TABLE users ADD COLUMN phone TEXT",
+        "ALTER TABLE users ADD COLUMN active INTEGER DEFAULT 1",
+        "ALTER TABLE attendance ADD COLUMN reason TEXT",
+        "ALTER TABLE attendance ADD COLUMN status_detail TEXT",
+    ]:
+        try:
+            cur.execute(stmt)
+        except Exception:
+            pass
+    defaults = {
+        "school_name": "Mispah Skool vir LSEN",
+        "reminder_time": "07:30",
+        "reminder_message": "Goeie more! Moet asseblief vandag se bywoning merk. Dankie.",
+        "admin_display_name": "Administrator",
+    }
+    for k, v in defaults.items():
+        try:
+            cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)", (k, v))
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+
+
+def get_active_announcements():
+    ensure_schema()
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT a.*, u.full_name FROM announcements a
+            LEFT JOIN users u ON u.id = a.created_by
+            WHERE a.active=1 ORDER BY a.created_at DESC LIMIT 5
+        """)
+        rows = [dict(r) for r in cur.fetchall()]
+    except Exception:
+        rows = []
     conn.close()
     return rows
 
@@ -1060,12 +1222,12 @@ def get_today_stats():
     cur = conn.cursor()
     cur.execute("""
         SELECT
-          SUM(CASE WHEN status='present' THEN 1 ELSE 0 END) AS present,
-          SUM(CASE WHEN status='absent' THEN 1 ELSE 0 END) AS absent,
+          COALESCE(SUM(CASE WHEN status='present' THEN 1 ELSE 0 END), 0) AS present,
+          COALESCE(SUM(CASE WHEN status='absent' THEN 1 ELSE 0 END), 0) AS absent,
           COUNT(*) AS marked
         FROM attendance WHERE attendance_date=?
     """, (today,))
-    row = dict(cur.fetchone())
+    row = dict(cur.fetchone() or {})
     cur.execute("SELECT COUNT(*) as c FROM learners WHERE active=1")
     row["enrolled"] = cur.fetchone()["c"]
     cur.execute("SELECT COUNT(DISTINCT class_id) as c FROM daily_signatures WHERE attendance_date=?", (today,))

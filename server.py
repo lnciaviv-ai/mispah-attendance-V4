@@ -1936,6 +1936,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     db.init_db()
+    db.ensure_schema()
     server = HTTPServer((HOST, PORT), Handler)
     print(f"Mispah Attendance System running at http://localhost:{PORT}")
     print("Press Ctrl+C to stop.")
