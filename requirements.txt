@@ -1,0 +1,4 @@
+# This app uses only the Python standard library.
+# No external packages are required.
+# The empty requirements.txt is provided so cloud platforms
+# (Render, Railway, PythonAnywhere, etc.) accept the project.
