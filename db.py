@@ -673,6 +673,53 @@ def update_class(class_id: int, name: str, teacher_name: str, sort_order: int = 
     conn.commit()
     conn.close()
 
+
+def transfer_learners(from_class_id: int, to_class_id: int, mode: str = "move"):
+    """
+    mode=move: change class_id of all active learners (keeps same learner records + history)
+    mode=copy: create new learner rows in destination class (duplicates names)
+    Returns number of learners affected.
+    """
+    if from_class_id == to_class_id:
+        raise ValueError("Bron- en teikenklas kan nie dieselfde wees nie")
+    def _do():
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, first_name, last_name, gender FROM learners WHERE class_id=? AND active=1",
+                (from_class_id,),
+            )
+            learners = cur.fetchall()
+            if not learners:
+                return 0
+            if mode == "copy":
+                for l in learners:
+                    cur.execute(
+                        "INSERT INTO learners (class_id, first_name, last_name, gender, active) VALUES (?,?,?,?,1)",
+                        (to_class_id, l["first_name"], l["last_name"], l["gender"]),
+                    )
+            else:
+                # move — preserve learner id and all attendance history
+                cur.execute(
+                    "UPDATE learners SET class_id=? WHERE class_id=? AND active=1",
+                    (to_class_id, from_class_id),
+                )
+            conn.commit()
+            return len(learners)
+        finally:
+            conn.close()
+    return _with_retry(_do)
+
+def count_active_learners(class_id: int) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) as c FROM learners WHERE class_id=? AND active=1", (class_id,))
+    n = cur.fetchone()["c"]
+    conn.close()
+    return n
+
+
 def delete_class(class_id: int):
     """Delete class only if no active learners."""
     conn = get_conn()

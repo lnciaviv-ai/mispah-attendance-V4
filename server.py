@@ -956,26 +956,65 @@ def classes_admin_page(user, msg=None, error=None):
     msg_html = ""
     if msg: msg_html = f'<div class="alert alert-success">{html_escape(msg)}</div>'
     if error: msg_html = f'<div class="alert alert-error">{html_escape(error)}</div>'
+
+    class_opts = "".join(
+        f'<option value="{c["id"]}">{html_escape(c["name"])} ({db.count_active_learners(c["id"])} leerders)</option>'
+        for c in classes
+    )
+
     rows = ""
     for c in classes:
+        n = db.count_active_learners(c["id"])
         rows += f"""
         <tr>
           <td>{html_escape(c['name'])}</td>
           <td>{html_escape(c['teacher_name'])}</td>
+          <td>{n}</td>
           <td>{html_escape(c.get('theme') or 'ocean')}</td>
-          <td>{c.get('sort_order',0)}</td>
           <td>
             <a class="btn btn-sm btn-outline" href="/admin/classes?edit={c['id']}">Wysig</a>
             <a class="btn btn-sm btn-danger" href="/admin/classes?delete={c['id']}"
                onclick="return confirm('Verwyder hierdie klas?')">Verwyder</a>
           </td>
         </tr>"""
+
     body = f"""
     {msg_html}
+    <div class="card" style="border-left:5px solid var(--accent);">
+      <h2>Bevorder / skuif leerders na volgende graad</h2>
+      <p style="color:var(--muted);margin-bottom:1rem;">
+        Aan die einde van die jaar: kies die ou klas en die nuwe klas.
+        <strong>Skuif</strong> beweeg al die name (geskiedenis bly behoue).
+        <strong>Kopieer</strong> maak nuwe rekords in die teikenklas (ou klas bly onveranderd).
+      </p>
+      <form method="POST" action="/admin/classes" class="grid-2">
+        <input type="hidden" name="action" value="transfer">
+        <div>
+          <label>Van klas (huidige graad)</label>
+          <select name="from_class_id" required>{class_opts}</select>
+        </div>
+        <div>
+          <label>Na klas (volgende graad)</label>
+          <select name="to_class_id" required>{class_opts}</select>
+        </div>
+        <div>
+          <label>Aksie</label>
+          <select name="mode">
+            <option value="move">Skuif leerders (aanbeveel vir nuwe jaar)</option>
+            <option value="copy">Kopieer leerders (hou ou klas ook)</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:flex-end;">
+          <button type="submit" class="btn-success"
+            onclick="return confirm('Is jy seker? Dit raak alle aktiewe leerders in die bronklas.')">
+            Voer oor
+          </button>
+        </div>
+      </form>
+    </div>
+
     <div class="card">
-      <h2>Bestuur klasse / grade</h2>
-      <p style="color:var(--muted);margin-bottom:1rem;">Voeg nuwe klasse by of wysig bestaande. Data van vorige jare bly behoue.</p>
-      <h3>Voeg nuwe klas by</h3>
+      <h2>Voeg nuwe klas / graad by</h2>
       <form method="POST" action="/admin/classes" class="grid-2">
         <input type="hidden" name="action" value="add">
         <div><label>Klasnaam</label><input type="text" name="name" required placeholder="bv. Multi-Graad 6"></div>
@@ -989,16 +1028,18 @@ def classes_admin_page(user, msg=None, error=None):
         <div style="grid-column:1/-1;"><button type="submit" class="btn-success">Voeg klas by</button></div>
       </form>
     </div>
+
     <div class="card">
       <h2>Huidige klasse</h2>
       <table>
-        <thead><tr><th>Naam</th><th>Opvoeder</th><th>Tema</th><th>Volgorde</th><th>Aksie</th></tr></thead>
+        <thead><tr><th>Naam</th><th>Opvoeder</th><th>Leerders</th><th>Tema</th><th>Aksie</th></tr></thead>
         <tbody>{rows}</tbody>
       </table>
     </div>
     <p><a class="btn btn-outline" href="/admin">← Terug</a></p>
     """
     return page("Klasse", body, user)
+
 
 def edit_class_page(user, class_id):
     cls = db.get_class(class_id)
@@ -1851,6 +1892,18 @@ class Handler(BaseHTTPRequestHandler):
             admin = self.require_admin()
             if not admin: return
             action = form.get("action", [""])[0]
+            if action == "transfer":
+                try:
+                    from_id = int(form["from_class_id"][0])
+                    to_id = int(form["to_class_id"][0])
+                    mode = form.get("mode", ["move"])[0]
+                    n = db.transfer_learners(from_id, to_id, mode)
+                    db.audit(admin["id"], "transfer_learners", f"from={from_id} to={to_id} mode={mode} n={n}")
+                    word = "geskuif" if mode == "move" else "gekopieer"
+                    redirect(self, f"/admin/classes?msg={n}+leerders+{word}")
+                except Exception as e:
+                    self.send_html(classes_admin_page(admin, error=str(e)))
+                return
             if action == "add":
                 try:
                     db.add_class(
