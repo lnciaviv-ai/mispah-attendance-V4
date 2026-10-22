@@ -5,6 +5,7 @@ import sqlite3
 import hashlib
 import os
 from datetime import datetime, date
+import time
 
 DB_PATH = os.environ.get("ATTENDANCE_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "attendance.db"))
 
@@ -65,10 +66,27 @@ THEMES = {
     },
 }
 
+def _with_retry(fn, retries=6, delay=0.2):
+    """Retry write when SQLite reports database is locked."""
+    last = None
+    for i in range(retries):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            last = e
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                time.sleep(delay * (i + 1))
+                continue
+            raise
+    raise last
+
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    """Open a SQLite connection that tolerates concurrent access (Render / multi-request)."""
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 def hash_password(password: str) -> str:
@@ -356,49 +374,58 @@ def get_all_teachers():
     return rows
 
 def add_teacher(username: str, password: str, full_name: str, class_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "INSERT INTO users (username, password_hash, full_name, role, class_id) VALUES (?,?,?,?,?)",
-            (username.strip().lower(), hash_password(password), full_name.strip(), "teacher", class_id),
-        )
-        cur.execute("UPDATE classes SET teacher_name=? WHERE id=?", (full_name.strip(), class_id))
-        conn.commit()
-        return cur.lastrowid
-    except sqlite3.IntegrityError:
-        raise ValueError("Gebruikersnaam bestaan reeds")
-    finally:
-        conn.close()
+    def _do():
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO users (username, password_hash, full_name, role, class_id) VALUES (?,?,?,?,?)",
+                (username.strip().lower(), hash_password(password), full_name.strip(), "teacher", class_id),
+            )
+            cur.execute("UPDATE classes SET teacher_name=? WHERE id=?", (full_name.strip(), class_id))
+            conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            raise ValueError("Gebruikersnaam bestaan reeds")
+        finally:
+            conn.close()
+    return _with_retry(_do)
 
 def delete_teacher(user_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT role FROM users WHERE id=?", (user_id,))
-    row = cur.fetchone()
-    if not row or row["role"] != "teacher":
-        conn.close()
-        raise ValueError("Slegs onderwysers kan verwyder word")
-    cur.execute("DELETE FROM users WHERE id=?", (user_id,))
-    conn.commit()
-    conn.close()
+    def _do():
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT role FROM users WHERE id=?", (user_id,))
+            row = cur.fetchone()
+            if not row or row["role"] != "teacher":
+                raise ValueError("Slegs onderwysers kan verwyder word")
+            cur.execute("DELETE FROM users WHERE id=?", (user_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    return _with_retry(_do)
 
 def update_teacher(user_id: int, full_name: str, class_id: int, new_password: str = None):
-    conn = get_conn()
-    cur = conn.cursor()
-    if new_password:
-        cur.execute(
-            "UPDATE users SET full_name=?, class_id=?, password_hash=? WHERE id=? AND role='teacher'",
-            (full_name.strip(), class_id, hash_password(new_password), user_id),
-        )
-    else:
-        cur.execute(
-            "UPDATE users SET full_name=?, class_id=? WHERE id=? AND role='teacher'",
-            (full_name.strip(), class_id, user_id),
-        )
-    cur.execute("UPDATE classes SET teacher_name=? WHERE id=?", (full_name.strip(), class_id))
-    conn.commit()
-    conn.close()
+    def _do():
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            if new_password:
+                cur.execute(
+                    "UPDATE users SET full_name=?, class_id=?, password_hash=? WHERE id=? AND role='teacher'",
+                    (full_name.strip(), class_id, hash_password(new_password), user_id),
+                )
+            else:
+                cur.execute(
+                    "UPDATE users SET full_name=?, class_id=? WHERE id=? AND role='teacher'",
+                    (full_name.strip(), class_id, user_id),
+                )
+            cur.execute("UPDATE classes SET teacher_name=? WHERE id=?", (full_name.strip(), class_id))
+            conn.commit()
+        finally:
+            conn.close()
+    return _with_retry(_do)
 
 def get_learners_by_class(class_id: int, active_only: bool = True):
     conn = get_conn()
@@ -464,12 +491,16 @@ def deactivate_learner(learner_id: int):
     conn.close()
 
 def delete_learner_permanently(learner_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM attendance WHERE learner_id=?", (learner_id,))
-    cur.execute("DELETE FROM learners WHERE id=?", (learner_id,))
-    conn.commit()
-    conn.close()
+    def _do():
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM attendance WHERE learner_id=?", (learner_id,))
+            cur.execute("DELETE FROM learners WHERE id=?", (learner_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    return _with_retry(_do)
 
 def save_attendance(attendance_date: str, class_id: int, records: list, user_id: int):
     conn = get_conn()
