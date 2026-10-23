@@ -820,15 +820,7 @@ def learners_admin_page(user, msg=None, error=None):
             <option value="dogter">Dogter</option>
           </select>
         </div>
-        <div>
-          <label>Ouer / Voog naam</label>
-          <input type="text" name="parent_name" placeholder="Opsioneel">
-        </div>
-        <div>
-          <label>Ouer selfoon</label>
-          <input type="text" name="parent_phone" placeholder="bv. 082...">
-        </div>
-        <div style="grid-column:1/-1;">
+<div style="grid-column:1/-1;">
           <button type="submit" class="btn-success">Voeg leerder by</button>
         </div>
       </form>
@@ -1633,8 +1625,6 @@ class Handler(BaseHTTPRequestHandler):
                   <td>{html_escape(l['first_name'])} {html_escape(l['last_name'])}</td>
                   <td>{html_escape(l['class_name'])}</td>
                   <td>{l['gender']}</td>
-                  <td>{html_escape(l.get('parent_name') or '—')}</td>
-                  <td>{html_escape(l.get('parent_phone') or '—')}</td>
                   <td><a class="btn btn-sm btn-outline" href="/admin/learners?edit={l['id']}">Wysig</a></td>
                 </tr>"""
             body = f"""
@@ -1645,7 +1635,7 @@ class Handler(BaseHTTPRequestHandler):
                 <button type="submit">Soek</button>
               </form>
               <table>
-                <thead><tr><th>Naam</th><th>Klas</th><th>Geslag</th><th>Ouer</th><th>Kontak</th><th></th></tr></thead>
+                <thead><tr><th>Naam</th><th>Klas</th><th>Geslag</th><th>Status</th><th>Aksie</th></tr></thead>
                 <tbody>{rows or '<tr><td colspan=6>Geen resultate</td></tr>'}</tbody>
               </table>
             </div>
@@ -1830,8 +1820,6 @@ class Handler(BaseHTTPRequestHandler):
                         form["first_name"][0],
                         form["last_name"][0],
                         form["gender"][0],
-                        form.get("parent_name", [""])[0],
-                        form.get("parent_phone", [""])[0],
                     )
                     db.log_audit(admin["id"], "add_learner", form["first_name"][0] + " " + form["last_name"][0])
                     redirect(self, "/admin/learners?msg=Leerder+bygevoeg")

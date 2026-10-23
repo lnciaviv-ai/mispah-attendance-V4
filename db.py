@@ -461,16 +461,20 @@ def get_all_learners(active_only: bool = True):
     return rows
 
 def add_learner(class_id: int, first_name: str, last_name: str, gender: str, parent_name: str = "", parent_phone: str = ""):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO learners (class_id, first_name, last_name, gender, parent_name, parent_phone) VALUES (?,?,?,?,?,?)",
-        (class_id, first_name.strip(), last_name.strip(), gender, (parent_name or "").strip(), (parent_phone or "").strip()),
-    )
-    conn.commit()
-    lid = cur.lastrowid
-    conn.close()
-    return lid
+    """parent_name/parent_phone ignored — kept only for backward-compatible call sites."""
+    def _do():
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO learners (class_id, first_name, last_name, gender) VALUES (?,?,?,?)",
+                (class_id, first_name.strip(), last_name.strip(), gender),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+    return _with_retry(_do)
 
 def update_learner(learner_id: int, class_id: int, first_name: str, last_name: str, gender: str, active: int = 1):
     conn = get_conn()
@@ -945,7 +949,7 @@ def search_learners(q, active_only=True):
     sql = """
         SELECT l.*, c.name AS class_name FROM learners l
         JOIN classes c ON c.id = l.class_id
-        WHERE (l.first_name LIKE ? OR l.last_name LIKE ? OR l.parent_name LIKE ?)
+        WHERE (l.first_name LIKE ? OR l.last_name LIKE ? OR c.name LIKE ?)
     """
     if active_only:
         sql += " AND l.active=1"
