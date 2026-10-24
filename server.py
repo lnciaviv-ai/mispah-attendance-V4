@@ -647,6 +647,21 @@ def theme_page(user, class_id: int, msg=None):
 def admin_dashboard(user, attendance_date: str = None):
     if not attendance_date:
         attendance_date = today_str()
+
+    persist_ok = db.is_persistent_storage()
+    persist_html = ""
+    if not persist_ok:
+        persist_html = """
+        <div class="alert alert-error no-print">
+          <strong>Belangrik – data kan verdwyn!</strong><br>
+          Hierdie diens hardloop sonder permanente berging. Op Render se gratis plan word die databasis
+          uitgevee wanneer die diens slaap (na ~15 min stilte) of herbegin.<br><br>
+          <strong>Oplossing:</strong> Sit ’n Persistent Disk by op Render (mount pad <code>/data</code>)
+          en stel environment variable <code>ATTENDANCE_DB=/data/attendance.db</code>.
+          Of laai gereeld ’n rugsteun af onder <a href="/admin/settings">Instellings</a>.
+        </div>
+        """
+
     register = db.get_full_daily_register(attendance_date)
     signoff = db.get_admin_signoff(attendance_date)
 
@@ -713,6 +728,7 @@ def admin_dashboard(user, attendance_date: str = None):
         """
 
     body = f"""
+    {persist_html}
     <div class="card no-print">
       <h2>Admin – Daaglikse register</h2>
       <form method="GET" action="/admin" style="display:flex;gap:0.75rem;align-items:flex-end;flex-wrap:wrap;">
@@ -1290,6 +1306,27 @@ def settings_page(user, msg=None):
         <button type="submit" class="btn">Stoor profiel</button>
       </form>
     </div>
+
+    <div class="card">
+      <h2>Rugsteun &amp; herstel (teen dataverlies)</h2>
+      <p style="color:var(--muted);margin-bottom:1rem;">
+        Laai gereeld ’n rugsteun af. As Render die data uitvee, kan jy dit hier teruglaai.
+      </p>
+      <p>
+        <a class="btn btn-success" href="/admin/backup">⬇ Laai volle rugsteun af (JSON)</a>
+      </p>
+      <form method="POST" action="/admin/restore" enctype="multipart/form-data" style="margin-top:1.25rem;"
+            onsubmit="return confirm('Dit vervang HUIDIGE data met die rugsteun. Is jy seker?')">
+        <label>Herstel vanaf rugsteun-lêer</label>
+        <input type="file" name="backup_file" accept=".json,application/json" required>
+        <button type="submit" class="btn-danger">Herstel data</button>
+      </form>
+      <p style="margin-top:1rem;font-size:0.9rem;color:var(--muted);">
+        Databasis-pad: <code>{html_escape(db.DB_PATH)}</code><br>
+        Permanente berging: <strong>{"Ja" if db.is_persistent_storage() else "Nee – risiko van dataverlies"}</strong>
+      </p>
+    </div>
+
     <p><a class="btn btn-outline" href="/admin">← Terug</a></p>
     """
     return page("Instellings", body, user)
@@ -1408,6 +1445,61 @@ def audit_page(user):
     </div>
     """
     return page("Oudit", body, user)
+
+
+
+def parse_multipart(handler, body=None):
+    """Parse multipart form; returns (fields dict, files dict of name->bytes)."""
+    ctype = handler.headers.get("Content-Type", "")
+    if body is None:
+        length = int(handler.headers.get("Content-Length", 0))
+        body = handler.rfile.read(length) if length else b""
+    fields, files = {}, {}
+    if "multipart/form-data" not in ctype:
+        qs = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"))
+        return {k: v[0] if len(v)==1 else v for k,v in qs.items()}, files
+    # boundary
+    boundary = None
+    for part in ctype.split(";"):
+        part = part.strip()
+        if part.startswith("boundary="):
+            boundary = part.split("=", 1)[1].strip().strip('"')
+    if not boundary:
+        return fields, files
+    sep = b"--" + boundary.encode()
+    for chunk in body.split(sep):
+        if not chunk or chunk in (b"--", b"--\r\n", b"\r\n"):
+            continue
+        if chunk.startswith(b"\r\n"):
+            chunk = chunk[2:]
+        if chunk.endswith(b"\r\n"):
+            chunk = chunk[:-2]
+        if chunk == b"--":
+            continue
+        header_end = chunk.find(b"\r\n\r\n")
+        if header_end < 0:
+            continue
+        headers_raw = chunk[:header_end].decode("utf-8", errors="replace")
+        data = chunk[header_end+4:]
+        if data.endswith(b"\r\n"):
+            data = data[:-2]
+        name = None
+        filename = None
+        for line in headers_raw.split("\r\n"):
+            if line.lower().startswith("content-disposition:"):
+                for bit in line.split(";"):
+                    bit = bit.strip()
+                    if bit.startswith("name="):
+                        name = bit.split("=",1)[1].strip().strip('"')
+                    if bit.startswith("filename="):
+                        filename = bit.split("=",1)[1].strip().strip('"')
+        if not name:
+            continue
+        if filename is not None:
+            files[name] = data
+        else:
+            fields[name] = data.decode("utf-8", errors="replace")
+    return fields, files
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1742,6 +1834,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+
+        if path == "/admin/backup":
+            admin = self.require_admin()
+            if not admin: return
+            import json as _json
+            data = db.export_full_backup()
+            raw = _json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+            fname = f"mispah_backup_{today_str()}.json"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         self.send_error(404, "Bladsy nie gevind nie")
 
     def do_POST(self):
@@ -1749,6 +1856,29 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
+
+        # File upload restore must use multipart (before form parse)
+        if path == "/admin/restore":
+            admin = self.require_admin()
+            if not admin: return
+            import json as _json
+            try:
+                fields, files = parse_multipart(self, body=body)
+                raw = files.get("backup_file") or b""
+                if not raw:
+                    self.send_html(page("Fout", '<div class="alert alert-error">Geen lêer ontvang nie.</div><a class="btn" href="/admin/settings">Terug</a>', admin))
+                    return
+                data = _json.loads(raw.decode("utf-8"))
+                db.import_full_backup(data, replace=True)
+                try:
+                    db.audit(admin["id"], "restore_backup", "full")
+                except Exception:
+                    pass
+                redirect(self, "/admin/settings?msg=Data+hersteld+van+rugsteun")
+            except Exception as e:
+                self.send_html(page("Fout", f'<div class="alert alert-error">Herstel misluk: {html_escape(str(e))}</div><a class="btn" href="/admin/settings">Terug</a>', admin))
+            return
+
         form = self.parse_qs(body)
 
         if path == "/login":
@@ -1973,19 +2103,4 @@ class Handler(BaseHTTPRequestHandler):
             redirect(self, "/admin/announcements?msg=Aankondiging+geplaas")
             return
 
-        self.send_error(404)
-
-def main():
-    db.init_db()
-    db.ensure_schema()
-    server = HTTPServer((HOST, PORT), Handler)
-    print(f"Mispah Attendance System running at http://localhost:{PORT}")
-    print("Press Ctrl+C to stop.")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopped.")
-        server.server_close()
-
-if __name__ == "__main__":
-    main()
+        

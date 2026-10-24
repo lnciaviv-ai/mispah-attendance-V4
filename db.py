@@ -1121,6 +1121,76 @@ def add_announcement(title, body, user_id):
     return aid
 
 
+
+def is_persistent_storage():
+    """True if DB looks like it is on a mounted persistent volume."""
+    p = os.path.abspath(DB_PATH)
+    return p.startswith("/data/") or p.startswith("/var/data/") or bool(os.environ.get("ATTENDANCE_DB"))
+
+def export_full_backup():
+    """Export all critical tables to a JSON-serializable dict."""
+    ensure_schema()
+    conn = get_conn()
+    cur = conn.cursor()
+    data = {"version": 1, "exported_at": datetime.now().isoformat(timespec="seconds")}
+    for table in ("classes", "users", "learners", "attendance", "daily_signatures",
+                  "admin_signoff", "messages", "settings", "announcements", "audit_log", "reminder_log"):
+        try:
+            cur.execute(f"SELECT * FROM {table}")
+            cols = [d[0] for d in cur.description]
+            data[table] = [dict(zip(cols, row)) for row in cur.fetchall()]
+        except Exception:
+            data[table] = []
+    conn.close()
+    return data
+
+def import_full_backup(data: dict, replace: bool = True):
+    """Restore from export_full_backup(). replace=True clears tables first."""
+    ensure_schema()
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise ValueError("Ongeldige rugsteun-lêer")
+
+    def _do():
+        conn = get_conn()
+        try:
+            cur = conn.cursor()
+            order = ["classes", "users", "learners", "attendance", "daily_signatures",
+                     "admin_signoff", "messages", "settings", "announcements", "audit_log", "reminder_log"]
+            if replace:
+                # delete in reverse dependency order
+                for table in reversed(order):
+                    try:
+                        cur.execute(f"DELETE FROM {table}")
+                    except Exception:
+                        pass
+            for table in order:
+                rows = data.get(table) or []
+                if not rows:
+                    continue
+                cols = list(rows[0].keys())
+                placeholders = ",".join(["?"] * len(cols))
+                col_list = ",".join(cols)
+                for row in rows:
+                    vals = [row.get(c) for c in cols]
+                    try:
+                        cur.execute(
+                            f"INSERT OR REPLACE INTO {table} ({col_list}) VALUES ({placeholders})",
+                            vals,
+                        )
+                    except Exception as e:
+                        # try plain insert
+                        try:
+                            cur.execute(
+                                f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})",
+                                vals,
+                            )
+                        except Exception:
+                            pass
+            conn.commit()
+        finally:
+            conn.close()
+    return _with_retry(_do)
+
 def ensure_schema():
     """Create any missing tables/columns. Safe to call repeatedly."""
     conn = get_conn()
