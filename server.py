@@ -654,10 +654,10 @@ def admin_dashboard(user, attendance_date: str = None):
         persist_html = """
         <div class="alert alert-error no-print">
           <strong>Belangrik – data kan verdwyn!</strong><br>
-          Hierdie diens hardloop sonder permanente berging. Op Render se gratis plan word die databasis
-          uitgevee wanneer die diens slaap (na ~15 min stilte) of herbegin.<br><br>
-          <strong>Oplossing:</strong> Sit ’n Persistent Disk by op Render (mount pad <code>/data</code>)
-          en stel environment variable <code>ATTENDANCE_DB=/data/attendance.db</code>.
+          Hierdie diens hardloop sonder permanente berging (SQLite op tydelike skyf).<br><br>
+          <strong>Oplossing:</strong> Koppel <strong>Neon Postgres</strong> —
+          sit environment variable <code>DATABASE_URL</code> na jou Neon connection string.
+          Dan bly data permanent, selfs as Render slaap.<br>
           Of laai gereeld ’n rugsteun af onder <a href="/admin/settings">Instellings</a>.
         </div>
         """
@@ -2104,3 +2104,30 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         
+
+        self.send_error(404)
+
+def main():
+    print("Starting Mispah Attendance System...")
+    print("DATABASE_URL set:", bool(os.environ.get("DATABASE_URL")))
+    try:
+        db.init_db()
+        db.ensure_schema()
+    except Exception as e:
+        print("WARNING: database init error:", e)
+        import traceback
+        traceback.print_exc()
+        # Continue anyway – first request may still work after Neon is ready
+    port = int(os.environ.get("PORT", 8080))
+    host = "0.0.0.0"
+    server = HTTPServer((host, port), Handler)
+    print(f"Mispah Attendance System running at http://{host}:{port}")
+    print("Persistent storage:", db.is_persistent_storage())
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        server.server_close()
+
+if __name__ == "__main__":
+    main()
